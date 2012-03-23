@@ -184,47 +184,7 @@ module Technoweenie # :nodoc:
         base.after_destroy :destroy_file
         base.after_validation :process_attachment
         if defined?(::ActiveSupport::Callbacks)
-          base.define_callbacks :after_resize, :after_attachment_saved, :before_thumbnail_saved
-        end
-      end
-
-      unless defined?(::ActiveSupport::Callbacks)
-        # Callback after an image has been resized.
-        #
-        #   class Foo < ActiveRecord::Base
-        #     acts_as_attachment
-        #     after_resize do |record, img|
-        #       record.aspect_ratio = img.columns.to_f / img.rows.to_f
-        #     end
-        #   end
-        def after_resize(&block)
-          write_inheritable_array(:after_resize, [block])
-        end
-
-        # Callback after an attachment has been saved either to the file system or the DB.
-        # Only called if the file has been changed, not necessarily if the record is updated.
-        #
-        #   class Foo < ActiveRecord::Base
-        #     acts_as_attachment
-        #     after_attachment_saved do |record|
-        #       ...
-        #     end
-        #   end
-        def after_attachment_saved(&block)
-          write_inheritable_array(:after_attachment_saved, [block])
-        end
-
-        # Callback before a thumbnail is saved.  Use this to pass any necessary extra attributes that may be required.
-        #
-        #   class Foo < ActiveRecord::Base
-        #     acts_as_attachment
-        #     before_thumbnail_saved do |thumbnail|
-        #       record = thumbnail.parent
-        #       ...
-        #     end
-        #   end
-        def before_thumbnail_saved(&block)
-          write_inheritable_array(:before_thumbnail_saved, [block])
+          base.define_model_callbacks :attachment_saved
         end
       end
 
@@ -255,7 +215,7 @@ module Technoweenie # :nodoc:
 
     module InstanceMethods
       def self.included(base)
-        base.define_callbacks *[:after_resize, :after_attachment_saved, :before_thumbnail_saved] if base.respond_to?(:define_callbacks)
+        base.define_model_callbacks :attachment_saved
       end
 
       # Checks whether the attachment's content type is an image content type
@@ -295,7 +255,6 @@ module Technoweenie # :nodoc:
             :filename                 => thumbnail_name_for(file_name_suffix),
             :thumbnail_resize_options => size
           }, false)
-          callback_with_args :before_thumbnail_saved, thumb
           thumb.save!
         end
       end
@@ -455,14 +414,17 @@ module Technoweenie # :nodoc:
         # Cleans up after processing.  Thumbnails are created, the attachment is stored to the backend, and the temp_paths are cleared.
         def after_process_attachment
           if @saved_attachment
-            if respond_to?(:process_attachment_with_processing) && thumbnailable? && !attachment_options[:thumbnails].blank? && parent_id.nil?
-              temp_file = temp_path || create_temp_file
-              attachment_options[:thumbnails].each { |suffix, size| create_or_update_thumbnail(temp_file, suffix, *size) }
+            run_callbacks :attachment_saved do
+              if respond_to?(:process_attachment_with_processing) && thumbnailable? && !attachment_options[:thumbnails].blank? && parent_id.nil?
+                temp_file = temp_path || create_temp_file
+                attachment_options[:thumbnails].each { |suffix, size| create_or_update_thumbnail(temp_file, suffix, *size) }
+              end
+              save_to_storage
+              @temp_paths.clear
+              @saved_attachment = nil
+
+              notify_observers :after_attachment_saved
             end
-            save_to_storage
-            @temp_paths.clear
-            @saved_attachment = nil
-            callback :after_attachment_saved
           end
         end
 
@@ -472,40 +434,6 @@ module Technoweenie # :nodoc:
             resize_image(img, attachment_options[:resize_to])
           elsif thumbnail_resize_options # thumbnail
             resize_image(img, thumbnail_resize_options)
-          end
-        end
-
-        # Yanked from ActiveRecord::Callbacks, modified so I can pass args to the callbacks besides self.
-        # Only accept blocks, however
-        if ActiveSupport.const_defined?(:Callbacks)
-          # Rails 2.1 and beyond!
-          def callback_with_args(method, arg = self)
-            notify(method)
-
-            result = run_callbacks(method, { :object => arg }) { |result, object| result == false }
-
-            if result != false && respond_to_without_attributes?(method)
-              result = send(method)
-            end
-
-            result
-          end
-
-          def run_callbacks(kind, options = {}, &block)
-            options.reverse_merge!( :object => self )
-            self.class.send("#{kind}_callback_chain").run(options[:object], options, &block)
-          end
-        else
-          # Rails 2.0
-          def callback_with_args(method, arg = self)
-            notify(method)
-
-            result = nil
-            callbacks_for(method).each do |callback|
-              result = callback.call(self, arg)
-              return false if result == false
-            end
-            result
           end
         end
 
